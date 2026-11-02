@@ -145,30 +145,127 @@ class SearchTextResult(TypedDict, total=False):
 
 # Cached strings list: [(ea, text), ...]
 _strings_cache: list[tuple[int, str]] | None = None
+_strings_cache_complete = False
+_strings_cache_needs_rebuild = False
 _server_started_at = time.time()
 
 
-def _get_strings_cache() -> list[tuple[int, str]]:
-    """Get cached strings, building cache on first access.
+def _read_strlist_direct() -> list[tuple[int, str]]:
+    """Read IDA's already-built string list without rescanning the database.
+
+    ``idautils.Strings()`` calls ``ida_strlist.build_strlist()`` on every
+    construction. On large databases that rebuild takes many seconds even
+    though IDA has already indexed the strings. Reading the existing list is
+    dramatically faster (0.2s vs 16.7s for 37k strings on a 60MB input).
+    """
+    import ida_strlist
+
+    qty = ida_strlist.get_strlist_qty()
+    if qty <= 0:
+        return []
+
+    si = ida_strlist.string_info_t()
+    result: list[tuple[int, str]] = []
+    for index in range(qty):
+        if not ida_strlist.get_strlist_item(si, index):
+            continue
+        raw = ida_bytes.get_strlit_contents(si.ea, si.length, si.type)
+        if raw is None:
+            continue
+        result.append((si.ea, raw.decode("UTF-8", "replace")))
+    return result
+
+
+def _strlist_options_are_complete() -> bool:
+    """Check that IDA's string list contains both C and UTF-16 strings."""
+    try:
+        import ida_strlist
+
+        opts = ida_strlist.get_strlist_options()
+        types = {int(t) for t in opts.strtypes}
+        return (
+            0 in types
+            and 1 in types
+            and int(opts.minlen) == 5
+            and bool(opts.only_7bit)
+            and not bool(opts.ignore_heads)
+            and not bool(opts.display_only_existing_strings)
+        )
+    except Exception:
+        return False
+
+
+def _build_full_strlist() -> None:
+    """Rebuild IDA's string list with the same options as Strings.setup()."""
+    import ida_strlist
+
+    opts = ida_strlist.get_strlist_options()
+    opts.strtypes = [0, 1]  # C (ASCII/UTF-8) + Unicode C-style (UTF-16)
+    opts.minlen = 5
+    opts.only_7bit = True
+    opts.ignore_heads = False
+    opts.display_only_existing_strings = False
+    ida_strlist.build_strlist()
+
+
+def _get_strings_cache(build_if_needed: bool = True) -> list[tuple[int, str]]:
+    """Get cached strings, preserving the UTF-16 scan while avoiding rebuilds.
 
     Both ASCII (C-style) and UTF-16 (wide) strings are scanned so that
     ``find_regex`` can locate wide-char strings, which are common in Unreal
-    Engine and Windows binaries. ``idautils.Strings()`` defaults to
-    ``strtypes=[0]`` (C strings only), missing UTF-16 content — see #263.
+    Engine and Windows binaries (see #263). The cache is read directly from
+    IDA's existing string list; the expensive rebuild only happens when the
+    list is empty or its options do not include both types.
+
+    ``build_if_needed=False`` lets huge-database callers (survey) use the
+    existing list without a potentially multi-second rebuild. If that existing
+    list lacks UTF-16 strings, a later default call will rebuild it.
     """
-    global _strings_cache
-    if _strings_cache is None:
+    global _strings_cache, _strings_cache_complete, _strings_cache_needs_rebuild
+
+    if _strings_cache is not None:
+        if _strings_cache_complete or not build_if_needed:
+            return _strings_cache
+
+    try:
+        import ida_strlist
+
+        qty = ida_strlist.get_strlist_qty()
+        complete = _strlist_options_are_complete() if qty > 0 else False
+        need_build = qty <= 0 or not complete or _strings_cache_needs_rebuild
+
+        if need_build and build_if_needed:
+            _build_full_strlist()
+            qty = ida_strlist.get_strlist_qty()
+            complete = True  # _build_full_strlist installed the required options
+        elif qty <= 0:
+            _strings_cache_needs_rebuild = False
+            return []
+
+        strings = _read_strlist_direct()
+        _strings_cache = strings
+        _strings_cache_complete = complete
+        _strings_cache_needs_rebuild = False
+        return strings
+    except Exception:
+        # Older IDA versions or unexpected string-list state: use the standard
+        # helper as a fallback (and preserve the wide-string behavior).
+        if not build_if_needed:
+            return []
         strings = idautils.Strings()
-        # strtype 0 = C (ASCII/UTF-8), strtype 1 = Unicode C-Style (UTF-16).
         strings.setup(strtypes=[0, 1])
         _strings_cache = [(s.ea, str(s)) for s in strings if s is not None]
-    return _strings_cache
+        _strings_cache_complete = True
+        _strings_cache_needs_rebuild = False
+        return _strings_cache
 
 
 def invalidate_strings_cache():
     """Clear the strings cache (call after IDB changes)."""
-    global _strings_cache
+    global _strings_cache, _strings_cache_complete, _strings_cache_needs_rebuild
     _strings_cache = None
+    _strings_cache_complete = False
+    _strings_cache_needs_rebuild = True
 
 
 def init_caches():
@@ -406,6 +503,53 @@ def server_health() -> ServerHealthResult:
             "queued_calls": busy["queued"],
         }
     return _server_health_full()
+
+
+@tool
+@idasync
+def enable_interactive_mode(
+    delay_ms: Annotated[
+        int, "Delay in milliseconds before restoring IDA dialog boxes"
+    ] = 150,
+) -> dict[str, Any]:
+    """Restore IDA's interactive dialog boxes after a temporary -A launch.
+
+    The MCP sync wrapper sets idc.batch(1) around every tool call and restores
+    the previous value afterwards. Scheduling the change on the Qt event loop
+    makes it happen outside that transient batch window. Use this after
+    launching IDA with -A only to suppress startup dialogs; it re-enables
+    interactive windows such as Jump (g) and Cross-references (x).
+    """
+    try:
+        from PyQt5.QtCore import QTimer
+
+        backend = "pyqt5"
+    except ImportError:
+        try:
+            from PySide6.QtCore import QTimer
+
+            backend = "pyside6"
+        except ImportError:
+            QTimer = None
+            backend = "none"
+
+    try:
+        delay = max(0, min(int(delay_ms), 5000))
+    except (TypeError, ValueError):
+        delay = 150
+
+    if QTimer is None or not ida_kernwin.is_idaq():
+        # idalib/text mode has no interactive dialogs to restore.
+        return {"scheduled": False, "delay_ms": 0, "backend": backend}
+
+    def _enable():
+        try:
+            idc.batch(0)
+        except Exception:
+            pass
+
+    QTimer.singleShot(delay, _enable)
+    return {"scheduled": True, "delay_ms": delay, "backend": backend}
 
 
 @idasync

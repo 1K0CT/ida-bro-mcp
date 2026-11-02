@@ -28,6 +28,7 @@ from ..api_core import (
     imports_query,
     server_health,
     server_warmup,
+    enable_interactive_mode,
     find_regex,
     search_text,
     idb_save,
@@ -431,6 +432,14 @@ def test_server_health():
         "strings_cache_ready",
         "hexrays_ready",
     )
+
+
+@test()
+def test_enable_interactive_mode_idalib():
+    """enable_interactive_mode is a safe no-op outside the GUI."""
+    result = enable_interactive_mode(delay_ms=10)
+    assert_has_keys(result, "scheduled", "delay_ms", "backend")
+    assert result["scheduled"] is False
 
 
 @test()

@@ -213,6 +213,21 @@ hit them for an idle interval.
 
 _Note_: The `idalib` feature was contributed by [Willi Ballenthin](https://github.com/williballenthin).
 
+## Zero-Instance & Multi-Agent GUI Supervisor
+
+If you use GUI IDA instances and want the MCP endpoint to exist before the
+first instance is open, use the optional supervisor:
+
+```sh
+uv run ida-pro-mcp-supervisor --ida-exe "C:\Program Files\IDA Professional 9.3\ida.exe"
+```
+
+It keeps `http://127.0.0.1:13337/mcp` alive, launches the first GUI instance
+through `open_file`, isolates instance selection per MCP session/agent, and
+restores IDA's interactive dialogs after a dialog-free startup. See
+[docs/gui-supervisor.md](docs/gui-supervisor.md) for multi-agent configuration,
+`?agent=`/`?instance=` routing, and limitations.
+
 ## Headless idalib Session Model
 
 `idalib-mcp` is a supervisor that keeps each open database in its own idalib worker process. Workers register themselves in a host-local discovery directory and outlive the supervisor that spawned them; any subsequent supervisor that wants the same path adopts the running worker. A worker self-exits when no request has hit it for its idle TTL (default 1 hour). Call `idb_close` to release a worker eagerly (freeing a slot toward `--max-workers`), adopted GUI/worker instances are detached rather than killed.

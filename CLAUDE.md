@@ -8,6 +8,9 @@ IDA Pro MCP Server: exposes IDA Pro / idalib functionality to MCP clients.
 
 Main pieces:
 - `src/ida_pro_mcp/server.py`: MCP server entrypoint
+- `src/ida_pro_mcp/gui_supervisor.py`: optional GUI supervisor for
+  zero-instance bootstrap, per-session/agent instance routing, and dialog-free
+  startup followed by interactive-dialog restoration (`ida-pro-mcp-supervisor`)
 - `src/ida_pro_mcp/idalib_server.py`: headless idalib server
 - `src/ida_pro_mcp/ida_mcp/`: IDA/plugin-side APIs
 
