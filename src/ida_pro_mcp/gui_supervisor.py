@@ -547,6 +547,8 @@ def _no_instance_message(session_key: Optional[str] = None) -> str:
 
     reachable: list[dict[str, Any]] = []
     for inst in instances:
+        if str(inst.get("backend", "gui")) == "worker":
+            continue
         host = str(inst.get("host", DEFAULT_HOST))
         port = int(inst.get("port", 0))
         if _is_self(host, port):
@@ -563,10 +565,18 @@ def _no_instance_message(session_key: Optional[str] = None) -> str:
                 in (None, session_key)
             ]
         if not available:
+            listed = ", ".join(
+                f"{inst.get('port')} ({inst.get('binary') or '?'})"
+                for inst in reachable[:8]
+            )
+            if len(reachable) > 8:
+                listed += ", ..."
             return (
                 "All reachable IDA instances are assigned to other MCP "
-                "sessions/agents. Call open_file to launch your own instance, or "
-                "call select_instance(port=...) to explicitly share an existing one."
+                f"sessions/agents: {listed}. Call open_file with the same target "
+                "to attach to the existing instance (or launch your own), or call "
+                "select_instance(port=...) to explicitly share one. Use "
+                "list_instances to inspect them."
             )
 
     return ZERO_INSTANCE_MESSAGE
@@ -1152,6 +1162,30 @@ def _shell_execute_runas(ida_exe: str, args: list[str], cwd: Optional[str]) -> N
         )
 
 
+def _find_reusable_instance(
+    absolute_path: str, target: str
+) -> Optional[dict[str, Any]]:
+    """Find a reachable GUI instance already serving the same target."""
+    try:
+        instances = discovery.discover_instances()
+    except Exception as e:
+        log.warning("Reuse discovery failed: %s", e)
+        return None
+
+    for inst in instances:
+        if str(inst.get("backend", "gui")) == "worker":
+            continue
+        host = str(inst.get("host", DEFAULT_HOST))
+        port = int(inst.get("port", 0))
+        if _is_self(host, port) or not _reachable(inst):
+            continue
+        if discovery._instance_matches_launch(
+            inst, None, absolute_path, target
+        ):
+            return inst
+    return None
+
+
 @mcp.tool
 def open_file(
     file_path: Annotated[
@@ -1178,8 +1212,20 @@ def open_file(
         "Explicitly allow -A autonomous mode. Use only for batch jobs that do "
         "not need an interactive UI.",
     ] = False,
+    reuse_existing: Annotated[
+        bool,
+        "Attach to an existing reachable instance for the same target instead "
+        "of launching another IDA (default true). Set false to force a new process.",
+    ] = True,
 ) -> dict[str, Any]:
-    """Open a file in a new IDA Pro instance.
+    """Open a file in a new IDA Pro instance or attach to an existing one.
+
+    If a reachable instance already serves the same target (same IDB path, or
+    the same binary in the same directory), the caller's session is attached
+    to that instance by default; no second IDA process is launched. This
+    prevents two agents from opening the same module/IDB and triggering IDA's
+    "database is already open" warning. Set reuse_existing=false to force a new
+    process.
 
     Works even when no IDA instance is running: this supervisor launches IDA
     directly, then waits for the new plugin instance to register itself.
@@ -1190,18 +1236,6 @@ def open_file(
     restore Jump (g), Cross-references (x) and other dialog boxes. autonomous=True
     keeps the instance dialog-free and is refused unless allow_autonomous=True.
     """
-    if autonomous and not allow_autonomous:
-        return {
-            "success": False,
-            "error": (
-                "Refusing to launch IDA with -A (autonomous mode): IDA will not "
-                "display dialog boxes, so interactive actions such as Jump (g) "
-                "and Cross-references (x) stop working. Call open_file again with "
-                "autonomous=false (the default) for a user-facing instance, or "
-                "pass allow_autonomous=true only for a batch job that needs no UI."
-            ),
-        }
-
     pinned_port = _pinned_port()
     if pinned_port is not None:
         return {
@@ -1214,16 +1248,76 @@ def open_file(
         }
 
     session_key = _session_key()
-    autonomous_warning = (
-        "IDA launched in autonomous mode (-A); interactive dialogs are disabled."
-        if autonomous
-        else ""
-    )
 
     raw_path = os.path.expandvars(os.path.expanduser(str(file_path)))
     absolute_path = os.path.abspath(raw_path)
     if not os.path.isfile(absolute_path):
         return {"success": False, "error": f"File not found: {absolute_path}"}
+
+    target = absolute_path
+    if not new_database:
+        existing_idb = discovery._find_existing_idb(absolute_path)
+        if existing_idb:
+            target = existing_idb
+
+    if reuse_existing:
+        reusable = _find_reusable_instance(absolute_path, target)
+        if reusable is not None:
+            host = reusable.get("host", DEFAULT_HOST)
+            port = int(reusable.get("port", 0))
+            if switch:
+                _set_session_target(session_key, reusable)
+                _claim_instance(reusable, session_key, only_if_unowned=True)
+            message = (
+                f"Attached to existing IDA instance for the same target at "
+                f"{host}:{port}; no new IDA process was launched."
+            )
+            if not switch:
+                message += (
+                    " switch=false, so this session was not changed; use "
+                    f"select_instance(port={port}) to use it."
+                )
+            if new_database:
+                message += (
+                    " new_database was ignored because the target is already open."
+                )
+            result: dict[str, Any] = {
+                "success": True,
+                "host": host,
+                "port": port,
+                "binary": reusable.get("binary")
+                or os.path.basename(absolute_path),
+                "switched": bool(switch),
+                "message": message,
+            }
+            pid = reusable.get("pid")
+            if pid is not None:
+                result["pid"] = pid
+            log.info(
+                "Reusing existing IDA instance %s:%s for %s",
+                host,
+                port,
+                target,
+            )
+            return result
+
+    if autonomous and not allow_autonomous:
+        return {
+            "success": False,
+            "error": (
+                "Refusing to launch IDA with -A (autonomous mode): IDA will not "
+                "display dialog boxes, so interactive actions such as Jump (g) "
+                "and Cross-references (x) stop working. Call open_file again with "
+                "autonomous=false (the default) for a user-facing instance, or "
+                "pass allow_autonomous=true only for a batch job that needs no UI."
+            ),
+        }
+
+    autonomous_warning = (
+        "IDA launched in autonomous mode (-A); interactive dialogs are disabled."
+        if autonomous
+        else ""
+    )
 
     ida_exe = _resolve_ida_exe()
     if not ida_exe:
@@ -1234,12 +1328,6 @@ def open_file(
                 "ida.exe (or idat.exe)."
             ),
         }
-
-    target = absolute_path
-    if not new_database:
-        existing_idb = discovery._find_existing_idb(absolute_path)
-        if existing_idb:
-            target = existing_idb
 
     try:
         timeout_int = max(0, min(int(timeout), 600))

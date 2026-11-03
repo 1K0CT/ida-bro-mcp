@@ -89,10 +89,20 @@ Behavior:
   `open_file` affect only the caller's routing key.
 - An instance launched by a session is claimed by it; other sessions do not
   silently auto-select it. When every reachable instance is claimed, analysis
-  tools return an "assigned to other sessions/agents" error. Use
-  `select_instance(port=...)` to explicitly share, or `open_file` to create a
-  new instance.
-- `open_file` matches the new registration by launched PID first, then by
+  tools return an "assigned to other sessions/agents" error that lists the
+  reachable ports/binaries. Use `select_instance(port=...)` to explicitly
+  share, or `open_file` with the same target to attach.
+- `open_file` reuses an existing reachable instance for the same target (same
+  IDB path, or the same binary in the same directory) by default. It returns
+  "Attached to existing IDA instance..." and does **not** launch a second IDA
+  process, so two agents cannot accidentally open the same expanded IDB and
+  trigger IDA's "database is already open" warning. Set `reuse_existing=false`
+  to force a new process; when reusing, `new_database=true` is ignored and the
+  result message says so.
+- Multiple sessions/agents may select/share the same instance; sharing does not
+  change the owner's selection. The instance's owner remains the session that
+  launched it.
+- `open_file` matches a newly launched registration by PID first, then by
   target binary/IDB directory. Unrelated instances that appear concurrently are
   ignored.
 - Supervisor restart clears selections/claims; claims otherwise expire after
