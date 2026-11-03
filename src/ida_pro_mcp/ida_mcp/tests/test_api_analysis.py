@@ -31,6 +31,7 @@ from ..api_analysis import (
     find,
     export_funcs,
     callgraph,
+    _resolve_ref,
 )
 
 
@@ -38,6 +39,39 @@ CRACKME_CHECK_PW = "0x11a9"
 CRACKME_MAIN = "0x123e"
 CRACKME_CALL_TO_CHECK_PW = "0x12d3"
 CRACKME_USAGE_STRING = "0x2004"
+
+
+@test()
+def test_resolve_ref_decodes_wide_strings_as_utf8():
+    """get_strlit_contents returns UTF-8 bytes for wide strings; don't re-decode."""
+    import importlib
+
+    import ida_bytes
+    import ida_nalt
+
+    api_analysis = importlib.import_module(_resolve_ref.__module__)
+    old_name = api_analysis._resolve_ref_name
+    old_flags = ida_bytes.get_flags
+    old_is_strlit = ida_bytes.is_strlit
+    old_str_type = ida_nalt.get_str_type
+    old_contents = ida_bytes.get_strlit_contents
+    try:
+        api_analysis._resolve_ref_name = lambda ea: "aReadinputbuffe"
+        ida_bytes.get_flags = lambda ea: 0
+        ida_bytes.is_strlit = lambda flags: True
+        ida_nalt.get_str_type = lambda ea: 0x02000001  # C-style UTF-16
+        ida_bytes.get_strlit_contents = (
+            lambda ea, length, strtype: b"ReadInputBufferException"
+        )
+        ref = _resolve_ref(0x140030190)
+        assert ref is not None
+        assert ref.get("string") == "ReadInputBufferException"
+    finally:
+        api_analysis._resolve_ref_name = old_name
+        ida_bytes.get_flags = old_flags
+        ida_bytes.is_strlit = old_is_strlit
+        ida_nalt.get_str_type = old_str_type
+        ida_bytes.get_strlit_contents = old_contents
 
 
 @test()

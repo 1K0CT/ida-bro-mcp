@@ -571,9 +571,6 @@ def _resolve_ref_name(ea: int) -> str:
     return ""
 
 
-_STR_CODECS = {0: "utf-8", 1: "utf-16-le", 2: "utf-32-le"}
-
-
 def _resolve_ref(ea: int) -> Ref | None:
     name = _resolve_ref_name(ea)
     if not name:
@@ -586,11 +583,10 @@ def _resolve_ref(ea: int) -> Ref | None:
             strtype = ida_nalt.STRTYPE_C
         raw = ida_bytes.get_strlit_contents(ea, -1, strtype)
         if raw:
-            codec = _STR_CODECS.get(strtype & 3, "utf-8")
-            try:
-                info["string"] = raw.decode(codec, errors="replace")
-            except Exception:
-                pass
+            # get_strlit_contents returns UTF-8 text bytes for both narrow and
+            # wide string types. Re-decoding by strtype (utf-16-le/utf-32-le)
+            # turns valid wide strings into CJK mojibake, so always use UTF-8.
+            info["string"] = raw.decode("utf-8", errors="replace")
     return info
 
 
