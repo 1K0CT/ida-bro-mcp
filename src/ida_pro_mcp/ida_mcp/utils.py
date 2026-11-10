@@ -21,7 +21,9 @@ from typing import (
 import ida_bytes
 import ida_funcs
 import ida_hexrays
+import ida_ida
 import ida_kernwin
+import ida_name
 import ida_nalt
 import ida_typeinf
 import idaapi
@@ -605,21 +607,306 @@ def get_image_size() -> int:
     return image_size
 
 
+# ---------------------------------------------------------------------------
+# Symbol demangling
+#
+# IDA stores MSVC names in mangled form (``?Foo@Bar@@...``) and presents the
+# demangled form in the listing comments.  MCP tools must not leak the mangled
+# spelling to the agent: every name field, xref, call target and disassembly
+# line is rendered through the helpers below.  The short form is what IDA's
+# own listing shows, e.g. ``ParsingSession::~ParsingSession(void)``; it keeps
+# the parameter list but omits access specifiers and ``class`` keywords.
+# ---------------------------------------------------------------------------
+
+
+def _database_change_count() -> int | None:
+    """Return IDA's database change counter (used to invalidate name maps)."""
+    try:
+        return ida_ida.inf_get_database_change_count()
+    except Exception:
+        return None
+
+
+def is_mangled_name(name: str | None) -> bool:
+    """Return True when *name* is a compiler-mangled symbol."""
+    if not name:
+        return False
+    try:
+        return ida_name.get_mangled_name_type(name) != ida_name.MANGLED_UNKNOWN
+    except Exception:
+        # Fallback for older bindings: MSVC and Itanium/Rust prefixes.
+        return name.startswith(("?", "_Z", "__Z", "_R"))
+
+
+def demangle_symbol_name(name: str | None, *, short: bool = True) -> str:
+    """Demangle *name* with IDA's demangler, returning the input on failure."""
+    if not name:
+        return ""
+    if not is_mangled_name(name):
+        return name
+    try:
+        mask = ida_name.MNG_SHORT_FORM if short else ida_name.MNG_LONG_FORM
+        demangled = ida_name.demangle_name(name, mask)
+    except Exception:
+        demangled = None
+    return demangled or name
+
+
+def _raw_name_at(ea: int) -> str:
+    """Return the stored (mangled) name at *ea*, without inventing a dummy."""
+    try:
+        name = ida_name.get_ea_name(ea)
+    except Exception:
+        name = None
+    if name:
+        return name
+    func = idaapi.get_func(ea)
+    if func and func.start_ea == ea:
+        try:
+            return ida_funcs.get_func_name(ea) or ""
+        except Exception:
+            return ""
+    return ""
+
+
+def demangle_ea_name(ea: int, raw_name: str | None = None, *, short: bool = True) -> str:
+    """Return IDA's demangled name for the symbol at *ea*.
+
+    ``raw_name`` is an optional already-known mangled name; when omitted it is
+    read from the database.  Addresses without a name return ``""`` rather than
+    a synthetic dummy name.
+    """
+    raw = _raw_name_at(ea) if raw_name is None else raw_name
+    if not raw:
+        return ""
+    if not is_mangled_name(raw):
+        return raw
+    try:
+        demangled = (
+            ida_name.get_short_name(ea) if short else ida_name.get_long_name(ea)
+        )
+    except Exception:
+        demangled = None
+    if demangled and demangled != raw:
+        return demangled
+    # The address may not carry the symbol (e.g. a jump thunk or a reference
+    # whose name is stored on a different item).  Fall back to demangling the
+    # raw spelling directly.
+    return demangle_symbol_name(raw, short=short) or raw
+
+
+DEMANGLED_TO_EA: dict[str, int] = {}
+_DEMANGLED_MAP_CHANGE_COUNT: int | None = None
+_DEMANGLED_MAP_BUILT = False
+
+
+def _build_demangled_to_ea_map() -> dict[str, int]:
+    """Build a cache mapping demangled spellings back to addresses.
+
+    IDA's ``get_name_ea`` only understands the stored mangled name.  Since MCP
+    output now uses demangled names, accept those names as input too.  Both the
+    short form shown to the agent and the parameter-less form are indexed.
+    """
+    global _DEMANGLED_MAP_CHANGE_COUNT, _DEMANGLED_MAP_BUILT
+
+    mapping: dict[str, int] = {}
+    for ea, raw in idautils.Names():
+        if not raw or not is_mangled_name(raw):
+            continue
+        try:
+            short_name = ida_name.get_short_name(ea)
+        except Exception:
+            short_name = None
+        if short_name and short_name != raw:
+            mapping.setdefault(short_name, ea)
+        try:
+            no_args = ida_name.demangle_name(raw, ida_name.MNG_NODEFINIT)
+        except Exception:
+            no_args = None
+        if no_args and no_args != raw:
+            mapping.setdefault(no_args, ea)
+
+    DEMANGLED_TO_EA.clear()
+    DEMANGLED_TO_EA.update(mapping)
+    _DEMANGLED_MAP_CHANGE_COUNT = _database_change_count()
+    _DEMANGLED_MAP_BUILT = True
+    return mapping
+
+
+def invalidate_demangled_name_cache() -> None:
+    """Drop the demangled-name reverse map (call after renames)."""
+    global _DEMANGLED_MAP_CHANGE_COUNT, _DEMANGLED_MAP_BUILT
+    DEMANGLED_TO_EA.clear()
+    _DEMANGLED_MAP_CHANGE_COUNT = None
+    _DEMANGLED_MAP_BUILT = False
+
+
+def _looks_like_demangled_name(name: str) -> bool:
+    """Cheap gate so typos don't trigger a full-database name-map rebuild."""
+    return (
+        "::" in name
+        or "(" in name
+        or name.startswith(("public:", "protected:", "private:", "virtual:"))
+    )
+
+
+def resolve_name_ea(name: str) -> int:
+    """Resolve a stored or demangled symbol name to an address."""
+    if not name:
+        return idaapi.BADADDR
+    name = str(name).strip()
+    if not name:
+        return idaapi.BADADDR
+    try:
+        ea = idaapi.get_name_ea(idaapi.BADADDR, name)
+        if ea != idaapi.BADADDR:
+            return ea
+    except Exception:
+        pass
+
+    if not _looks_like_demangled_name(name):
+        return idaapi.BADADDR
+
+    count = _database_change_count()
+    if not _DEMANGLED_MAP_BUILT or _DEMANGLED_MAP_CHANGE_COUNT != count:
+        _build_demangled_to_ea_map()
+    return DEMANGLED_TO_EA.get(name, idaapi.BADADDR)
+
+
+def _instruction_symbol_pairs(ea: int) -> list[tuple[str, str]]:
+    """Return ``(mangled, demangled)`` pairs used by the instruction at *ea*.
+
+    Operand values cover the common cases (direct calls, RIP-relative
+    references, immediates) without the cost of materialising xref lists for
+    every instruction.  Xrefs are used as a fallback for unusual operand forms.
+    """
+    targets: list[int] = []
+    try:
+        insn = idaapi.insn_t()
+        if idaapi.decode_insn(insn, ea):
+            for n in range(8):
+                op = insn.ops[n]
+                if op.type == idaapi.o_void:
+                    break
+                if op.type in (idaapi.o_mem, idaapi.o_near, idaapi.o_far):
+                    target = op.addr
+                elif op.type == idaapi.o_imm:
+                    # Immediates are usually constants; only consider loaded
+                    # addresses (a function pointer can be an immediate).
+                    target = op.value
+                    if not idaapi.is_loaded(target):
+                        continue
+                else:
+                    continue
+                if target != idaapi.BADADDR:
+                    targets.append(target)
+    except Exception:
+        pass
+
+    pairs: dict[str, str] = {}
+    for target in targets:
+        raw = _raw_name_at(target)
+        if not raw:
+            continue
+        demangled = demangle_ea_name(target, raw)
+        if demangled and demangled != raw:
+            pairs[raw] = demangled
+
+    if not pairs:
+        try:
+            for target in idautils.CodeRefsFrom(ea, 0):
+                if target == idaapi.BADADDR:
+                    continue
+                raw = _raw_name_at(target)
+                if not raw:
+                    continue
+                demangled = demangle_ea_name(target, raw)
+                if demangled and demangled != raw:
+                    pairs[raw] = demangled
+            for target in idautils.DataRefsFrom(ea):
+                if target == idaapi.BADADDR:
+                    continue
+                raw = _raw_name_at(target)
+                if not raw:
+                    continue
+                demangled = demangle_ea_name(target, raw)
+                if demangled and demangled != raw:
+                    pairs[raw] = demangled
+        except Exception:
+            pass
+
+    # Longest first: one mangled name can be a prefix of another.
+    return sorted(pairs.items(), key=lambda item: len(item[0]), reverse=True)
+
+
+# Mangled tokens in listing text (function header/footer lines such as
+# ``??1Foo@@... proc near`` have no decodable instruction/operand pairs).
+# Optional prefixes cover jump thunks and import pointers.
+_MANGLED_TOKEN_RE = re.compile(
+    r"(?<![\w])(?:(?:j_|__imp_|imp_))?"
+    r"(?:\?{1,2}[^\s,;]+|__Z[^\s,;]+|_Z[^\s,;]+|_R[^\s,;]+)"
+)
+
+
+def demangle_rendered_line(ea: int, text: str) -> str:
+    """Demangle symbol names in a rendered disassembly line.
+
+    IDA renders a mangled operand followed by an automatic demangled comment:
+    ``call ??1Foo@@...; Foo::~Foo(void)``.  Replace the operand and drop only
+    that automatic duplicate comment.  User/type comments are preserved.
+    """
+    if not text:
+        return text
+
+    pairs = _instruction_symbol_pairs(ea)
+    demangled_names = {demangled for _, demangled in pairs}
+
+    comment: str | None = None
+    code = text
+    sep = text.find("; ")
+    if sep >= 0:
+        code = text[:sep]
+        comment = text[sep + 2 :]
+        # Only IDA's auto-demangle suffix is safe to remove.  If the address
+        # has a user comment, the trailing text belongs to the user.
+        try:
+            has_user_comment = bool(
+                ida_bytes.get_cmt(ea, False) or ida_bytes.get_cmt(ea, True)
+            )
+        except Exception:
+            has_user_comment = True
+        if not has_user_comment and comment:
+            parts = [part.strip() for part in comment.split("; ")]
+            kept = [part for part in parts if part not in demangled_names]
+            comment = "; ".join(kept) if kept else None
+
+    for raw, demangled in pairs:
+        if raw in code:
+            code = code.replace(raw, demangled)
+
+    # Catch mangled names that are not operands of a decodable instruction,
+    # e.g. ``??1Foo@@... proc near`` / ``... endp`` header and footer lines.
+    code = _MANGLED_TOKEN_RE.sub(
+        lambda match: demangle_symbol_name(match.group(0)), code
+    )
+
+    if comment:
+        return f"{code}; {comment}"
+    return code
+
+
 def parse_address(addr: str | int) -> int:
     if isinstance(addr, int):
         return addr
     try:
         return int(addr, 0)
     except ValueError:
-        # Try name-to-address resolution before failing
-        try:
-            import idaapi
-
-            ea = idaapi.get_name_ea(idaapi.BADADDR, addr.strip())
-            if ea != idaapi.BADADDR:
-                return ea
-        except ImportError:
-            pass
+        # Try name-to-address resolution before failing.  resolve_name_ea
+        # accepts both the stored mangled name and the demangled names this
+        # server exposes.
+        ea = resolve_name_ea(addr)
+        if ea != idaapi.BADADDR:
+            return ea
         for ch in addr:
             if ch not in "0123456789abcdefABCDEF":
                 raise IDAError(f"Not found: {addr!r}")
@@ -780,14 +1067,9 @@ def get_prototype(fn: ida_funcs.func_t) -> Optional[str]:
     return None
 
 
-DEMANGLED_TO_EA = {}
-
-
-def create_demangled_to_ea_map():
-    for ea in idautils.Functions():
-        demangled = idaapi.demangle_name(idc.get_name(ea, 0), idaapi.MNG_NODEFINIT)
-        if demangled:
-            DEMANGLED_TO_EA[demangled] = ea
+def create_demangled_to_ea_map() -> dict[str, int]:
+    """Rebuild and return the demangled-name -> address reverse map."""
+    return _build_demangled_to_ea_map()
 
 
 def get_type_by_name(type_name: str) -> ida_typeinf.tinfo_t:
@@ -1182,7 +1464,7 @@ def get_assembly_lines(ea: int) -> str:
     if not func:
         return ""
 
-    func_name: str = ida_funcs.get_func_name(func.start_ea) or "<unnamed>"
+    func_name: str = demangle_ea_name(func.start_ea) or "<unnamed>"
 
     # Get segment from first instruction
     first_seg = idaapi.getseg(func.start_ea)
@@ -1199,6 +1481,7 @@ def get_assembly_lines(ea: int) -> str:
                 break
             ops.append(idc.print_operand(item_ea, n) or "")
         instruction = f"{mnem} {', '.join(ops)}".rstrip()
+        instruction = demangle_rendered_line(item_ea, instruction)
         lines_str += f"\n{item_ea:x}  {instruction}"
 
     return lines_str
@@ -1259,8 +1542,8 @@ def get_callees(addr: str) -> list[dict]:
                         if idaapi.get_func(target) is not None
                         else "external"
                     )
-                    func_name = idc.get_name(target)
-                    if func_name is not None:
+                    func_name = demangle_ea_name(target)
+                    if func_name:
                         callees.append(
                             {
                                 "addr": hex(target),

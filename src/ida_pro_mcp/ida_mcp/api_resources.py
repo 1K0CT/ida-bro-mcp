@@ -20,6 +20,7 @@ from .utils import (
     Segment,
     StructureDefinition,
     StructureMember,
+    demangle_symbol_name,
     get_image_size,
     parse_address,
 )
@@ -104,7 +105,7 @@ def idb_entrypoints_resource() -> list[dict]:
     for i in range(entry_count):
         ordinal = compat.get_entry_ordinal(i)
         ea = compat.get_entry(ordinal)
-        name = compat.get_entry_name(ordinal)
+        name = demangle_symbol_name(compat.get_entry_name(ordinal))
         entrypoints.append({"addr": hex(ea), "name": name, "ordinal": ordinal})
     return entrypoints
 
@@ -260,11 +261,12 @@ def export_name_resource(name: Annotated[str, "Export name"]) -> dict:
         ordinal = compat.get_entry_ordinal(i)
         ea = compat.get_entry(ordinal)
         entry_name = compat.get_entry_name(ordinal)
+        display_name = demangle_symbol_name(entry_name)
 
-        if entry_name == name:
+        if entry_name == name or display_name == name:
             return {
                 "addr": hex(ea),
-                "name": entry_name,
+                "name": display_name,
                 "ordinal": ordinal,
             }
 

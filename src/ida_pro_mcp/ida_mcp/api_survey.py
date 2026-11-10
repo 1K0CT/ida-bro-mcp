@@ -35,7 +35,7 @@ from .rpc import tool
 from .sync import idasync, tool_timeout
 from . import compat
 from .api_core import _get_strings_cache
-from .utils import get_image_size
+from .utils import demangle_ea_name, demangle_symbol_name, get_image_size
 
 
 class SurveyMetadata(TypedDict):
@@ -375,7 +375,7 @@ def _build_entrypoints() -> list[dict]:
     for i in range(entry_count):
         ordinal = compat.get_entry_ordinal(i)
         ea = compat.get_entry(ordinal)
-        name = compat.get_entry_name(ordinal)
+        name = demangle_symbol_name(compat.get_entry_name(ordinal))
         entrypoints.append({"addr": hex(ea), "name": name, "ordinal": ordinal})
     return entrypoints
 
@@ -569,7 +569,7 @@ def _build_interesting_functions(
         classification = _classify_func(ea, func, name, callee_count)
         result.append({
             "addr": hex(ea),
-            "name": name,
+            "name": demangle_ea_name(ea, name),
             "size": size,
             "xref_count": xref_count,
             "callee_count": callee_count,
@@ -669,7 +669,7 @@ def _build_call_graph_summary(
                     has_callees = True
 
         if not has_callers:
-            root_functions.append(idaapi.get_name(ea) or hex(ea))
+            root_functions.append(demangle_ea_name(ea) or hex(ea))
         if not has_callees:
             leaf_count += 1
 

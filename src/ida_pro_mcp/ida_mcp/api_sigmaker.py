@@ -14,7 +14,12 @@ import ida_funcs
 
 from .rpc import tool
 from .sync import idasync
-from .utils import parse_address, normalize_list_input
+from .utils import (
+    demangle_ea_name,
+    normalize_list_input,
+    parse_address,
+    resolve_name_ea,
+)
 
 from . import _sigmaker as _sm
 
@@ -63,7 +68,7 @@ def _resolve_addr(addr_str: str) -> int:
     try:
         return parse_address(addr_str)
     except Exception:
-        ea = idaapi.get_name_ea(idaapi.BADADDR, addr_str)
+        ea = resolve_name_ea(addr_str)
         if ea == idaapi.BADADDR:
             raise ValueError(f"Cannot resolve address or name: {addr_str}")
         return ea
@@ -214,7 +219,7 @@ def make_signature_for_function(
                 continue
 
             func_ea = func.start_ea
-            func_name = idaapi.get_func_name(func_ea) or None
+            func_name = demangle_ea_name(func_ea) or None
             result = maker.make_signature(func_ea, cfg)
             sig_str = _format_sig(result.signature, fmt)
             results.append({

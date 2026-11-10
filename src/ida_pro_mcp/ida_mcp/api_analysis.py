@@ -14,7 +14,6 @@ import ida_idaapi
 import ida_kernwin
 import ida_xref
 import ida_ua
-import ida_name
 from .rpc import OUTPUT_LIMIT_MAX_CHARS, tool
 from .sync import idasync, tool_timeout, IDAError
 from .utils import (
@@ -28,6 +27,9 @@ from .utils import (
     get_stack_frame_variables_internal,
     decompile_function_safe,
     compact_whitespace,
+    demangle_ea_name,
+    demangle_rendered_line,
+    resolve_name_ea,
     get_assembly_lines,
     get_all_xrefs,
     get_all_comments,
@@ -525,7 +527,7 @@ def _resolve_function_start(query: object) -> tuple[int | None, str | None]:
     try:
         ea = parse_address(q)
     except Exception:
-        ea = idaapi.get_name_ea(idaapi.BADADDR, q)
+        ea = resolve_name_ea(q)
 
     if ea == idaapi.BADADDR:
         return None, f"Failed to resolve function: {q}"
@@ -562,12 +564,12 @@ def _collect_line_comments(ea: int) -> list[str]:
 
 
 def _resolve_ref_name(ea: int) -> str:
-    name = ida_name.get_ea_name(ea)
+    name = demangle_ea_name(ea)
     if name:
         return name
     func = idaapi.get_func(ea)
     if func and func.start_ea == ea:
-        return ida_funcs.get_func_name(ea) or ""
+        return demangle_ea_name(ea, ida_funcs.get_func_name(ea) or "")
     return ""
 
 
@@ -651,6 +653,7 @@ def _disasm_lines_limited(func: ida_funcs.func_t, max_insns: int) -> tuple[list[
             break
         line = ida_lines.generate_disasm_line(item_ea, 0)
         instruction = ida_lines.tag_remove(line) if line else ""
+        instruction = demangle_rendered_line(item_ea, instruction)
         lines.append(f"{item_ea:x}  {compact_whitespace(instruction)}")
     return lines, truncated
 
@@ -689,7 +692,7 @@ def _collect_callees_for_function(func: ida_funcs.func_t) -> list[dict]:
                 continue
             callees[callee_start] = {
                 "addr": hex(callee_start),
-                "name": ida_funcs.get_func_name(callee_start) or "<unnamed>",
+                "name": demangle_ea_name(callee_start) or "<unnamed>",
             }
     return list(callees.values())
 
@@ -711,7 +714,7 @@ def _collect_callers_for_function(func: ida_funcs.func_t) -> list[dict]:
 
         callers[caller_start] = {
             "addr": hex(caller_start),
-            "name": ida_funcs.get_func_name(caller_start) or "<unnamed>",
+            "name": demangle_ea_name(caller_start) or "<unnamed>",
         }
     return list(callers.values())
 
@@ -726,7 +729,7 @@ def _profile_function(
     if not func:
         return {"addr": hex(start_ea), "error": "Function not found"}
 
-    name = ida_funcs.get_func_name(func.start_ea) or "<unnamed>"
+    name = demangle_ea_name(func.start_ea) or "<unnamed>"
     size_int = func.end_ea - func.start_ea
     has_type = ida_nalt.get_tinfo(ida_typeinf.tinfo_t(), func.start_ea)
 
@@ -937,7 +940,7 @@ def disasm(
 
         if func:
             # Function exists: disassemble function items starting from requested address
-            func_name: str = ida_funcs.get_func_name(func.start_ea) or "<unnamed>"
+            func_name: str = demangle_ea_name(func.start_ea) or "<unnamed>"
             header_addr = start  # Use requested address, not function start
         else:
             # No function: disassemble sequentially from start address
@@ -959,11 +962,12 @@ def disasm(
             if len(lines) < max_instructions:
                 line = ida_lines.generate_disasm_line(ea, 0)
                 instruction = ida_lines.tag_remove(line) if line else ""
+                instruction = demangle_rendered_line(ea, instruction)
                 entry: dict = {
                     "addr": f"{ea:x}",
                     "instruction": compact_whitespace(instruction),
                 }
-                name = ida_name.get_ea_name(ea)
+                name = demangle_ea_name(ea)
                 if name:
                     entry["label"] = name
                 comments = _collect_line_comments(ea)
@@ -1097,7 +1101,7 @@ def func_profile(
                     {
                         "start_ea": fn.start_ea,
                         "addr": hex(fn.start_ea),
-                        "name": ida_funcs.get_func_name(fn.start_ea) or "<unnamed>",
+                        "name": demangle_ea_name(fn.start_ea) or "<unnamed>",
                         "size_int": fn.end_ea - fn.start_ea,
                         "size": hex(fn.end_ea - fn.start_ea),
                     }
@@ -1111,7 +1115,7 @@ def func_profile(
                     {
                         "start_ea": fn.start_ea,
                         "addr": hex(fn.start_ea),
-                        "name": ida_funcs.get_func_name(fn.start_ea) or "<unnamed>",
+                        "name": demangle_ea_name(fn.start_ea) or "<unnamed>",
                         "size_int": fn.end_ea - fn.start_ea,
                         "size": hex(fn.end_ea - fn.start_ea),
                     }
@@ -1199,7 +1203,7 @@ def analyze_batch(
             if not fn:
                 raise RuntimeError(f"Function not found: {q}")
 
-            fn_name = ida_funcs.get_func_name(fn.start_ea) or "<unnamed>"
+            fn_name = demangle_ea_name(fn.start_ea) or "<unnamed>"
             size_int = fn.end_ea - fn.start_ea
 
             include_decompile = bool(query.get("include_decompile", True))
@@ -1435,7 +1439,7 @@ def xref_query(
             try:
                 target = parse_address(q)
             except Exception:
-                target = idaapi.get_name_ea(idaapi.BADADDR, q)
+                target = resolve_name_ea(q)
                 if target == idaapi.BADADDR:
                     raise ValueError(f"Failed to resolve address/name: {q}")
 
@@ -1678,8 +1682,8 @@ def callees(
                             if idaapi.get_func(target) is not None
                             else "external"
                         )
-                        func_name = ida_name.get_name(target)
-                        if func_name is not None:
+                        func_name = demangle_ea_name(target)
+                        if func_name:
                             callees_dict[target] = {
                                 "addr": hex(target),
                                 "name": func_name,
@@ -2346,7 +2350,12 @@ def insn_query(
                 row = {"addr": addr_s}
                 if include_disasm:
                     line = ida_lines.generate_disasm_line(ea, 0)
-                    row["disasm"] = compact_whitespace(ida_lines.tag_remove(line)) if line else ""
+                    if line:
+                        text = ida_lines.tag_remove(line)
+                        text = demangle_rendered_line(ea, text)
+                        row["disasm"] = compact_whitespace(text)
+                    else:
+                        row["disasm"] = ""
                 if include_fn:
                     row["fn"] = get_function(ea, raise_error=False)
                 rows.append(row)
@@ -2417,7 +2426,7 @@ def export_funcs(
 
             func_data = {
                 "addr": addr,
-                "name": ida_funcs.get_func_name(func.start_ea),
+                "name": demangle_ea_name(func.start_ea),
                 "prototype": get_prototype(func),
                 "size": hex(func.end_ea - func.start_ea),
                 "comments": get_all_comments(ea),
@@ -2533,7 +2542,7 @@ def callgraph(
                 if not f:
                     return
 
-                func_name = ida_funcs.get_func_name(f.start_ea)
+                func_name = demangle_ea_name(f.start_ea)
                 nodes[hex(addr)] = {
                     "addr": hex(addr),
                     "name": func_name,

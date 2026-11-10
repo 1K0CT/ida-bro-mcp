@@ -4,6 +4,8 @@ from ..framework import test
 from ..sync import IDAError
 from ..utils import (
     parse_address,
+    demangle_symbol_name,
+    is_mangled_name,
     normalize_list_input,
     normalize_dict_list,
     looks_like_address,
@@ -56,6 +58,18 @@ def test_utils_parse_address_unknown_name():
         assert False, "expected parse_address to fail on unknown name"
     except IDAError as e:
         assert "Not found" in str(e)
+
+
+@test()
+def test_utils_demangle_symbol_name():
+    """Agent-facing names use IDA's short demangled spelling."""
+    raw = "?DetermineComponentWatchlistPolicy@CCbsExecutionObject@@AEAAJXZ"
+    assert is_mangled_name(raw)
+    demangled = demangle_symbol_name(raw)
+    assert "CCbsExecutionObject::DetermineComponentWatchlistPolicy" in demangled
+    # Plain C identifiers (and empty input) pass through unchanged.
+    assert demangle_symbol_name("main") == "main"
+    assert demangle_symbol_name("") == ""
 
 
 @test(binary="crackme03.elf")

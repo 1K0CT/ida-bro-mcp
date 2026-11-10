@@ -303,6 +303,13 @@ The bundled Codex plugin forwards the runtime's `IDA_MCP_*` configuration variab
 
 ## Core Functions
 
+Symbol names returned to the agent are IDA's short demangled forms
+(`ParsingSession::~ParsingSession(void)`, `wil::details::...`), never raw MSVC
+(`??1ParsingSession@@...`) or Itanium spellings. This applies to function
+lists, xrefs, callgraph nodes, disassembly labels/operands, decompiler refs,
+and survey output. `addr`/name arguments accept either the stored mangled name
+or the demangled form shown in tool results.
+
 - `lookup_funcs(queries)`: Get function(s) by address or name (auto-detects, accepts list or comma-separated string).
 - `int_convert(inputs)`: Convert numbers to different formats (decimal, hex, bytes, ASCII, binary).
 - `list_funcs(queries)`: List functions (paginated, filtered).

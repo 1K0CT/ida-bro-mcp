@@ -16,6 +16,7 @@ from .utils import (
     paginate,
     pattern_filter,
     parse_address,
+    resolve_name_ea,
     get_type_by_name,
     parse_decls_ctypes,
     my_modifier_t,
@@ -364,7 +365,7 @@ def read_struct(
             try:
                 addr = parse_address(addr_str)
             except Exception:
-                addr = idaapi.get_name_ea(idaapi.BADADDR, addr_str)
+                addr = resolve_name_ea(addr_str)
                 if addr == idaapi.BADADDR:
                     results.append(
                         {
@@ -931,7 +932,7 @@ def _apply_type_edit(edit: dict[str, Any]) -> SetTypeResult:
             ea = idaapi.BADADDR
             name = str(edit.get("name", "")).strip()
             if name:
-                ea = idaapi.get_name_ea(idaapi.BADADDR, name)
+                ea = resolve_name_ea(name)
             if ea == idaapi.BADADDR:
                 addr_text = str(edit.get("addr", "")).strip()
                 if not addr_text:

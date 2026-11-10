@@ -214,9 +214,27 @@ def inf_is_64bit() -> bool:
 def get_func_name(func: ida_funcs.func_t) -> str | None:
     # func_t.get_name() introduced in 8.5, but missing in early 9.0 builds (build 240925)
     # Use hasattr() to handle early IDA 9.0 builds that lack the method
+    raw = None
     if IDA_GE_85 and hasattr(func, "get_name"):
-        return func.get_name()
-    return ida_funcs.get_func_name(func.start_ea)
+        raw = func.get_name()
+    if not raw:
+        raw = ida_funcs.get_func_name(func.start_ea)
+    if not raw:
+        return raw
+    # Expose IDA's short demangled form (what the listing shows next to the
+    # mangled label), not the raw MSVC/Itanium spelling.  Skip the demangler
+    # for ordinary C identifiers to keep bulk listings cheap.
+    try:
+        import ida_name
+
+        if ida_name.get_mangled_name_type(raw) == ida_name.MANGLED_UNKNOWN:
+            return raw
+        demangled = ida_name.get_short_name(func.start_ea)
+        if demangled:
+            return demangled
+    except Exception:
+        pass
+    return raw
 
 
 def get_func_prototype(func: ida_funcs.func_t) -> ida_typeinf.tinfo_t | None:

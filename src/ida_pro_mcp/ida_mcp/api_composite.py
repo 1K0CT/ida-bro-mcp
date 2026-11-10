@@ -8,7 +8,10 @@ from typing import Annotated, Any, TypedDict
 from .rpc import tool, unsafe
 from .sync import idasync, tool_timeout, IDAError
 from .utils import (
+    demangle_ea_name,
+    demangle_rendered_line,
     parse_address,
+    resolve_name_ea,
     get_function,
     get_prototype,
     get_callees,
@@ -138,7 +141,7 @@ def _resolve_addr(addr: str) -> int:
     try:
         return parse_address(addr)
     except IDAError:
-        ea = idaapi.get_name_ea(idaapi.BADADDR, addr)
+        ea = resolve_name_ea(addr)
         if ea == idaapi.BADADDR:
             raise IDAError(f"Address/name not found: {addr!r}")
         return ea
@@ -227,7 +230,7 @@ def _analyze_function_internal(
             result["error"] = f"No function at {hex(ea)}"
             return result
 
-        result["name"] = idaapi.get_func_name(ea) or ""
+        result["name"] = demangle_ea_name(func.start_ea) or ""
         result["prototype"] = get_prototype(func)
         result["size"] = func.end_ea - func.start_ea
 
@@ -325,7 +328,7 @@ def analyze_component(
         if func is None:
             functions.append({"addr": hex(ea), "error": "No function"})
             continue
-        name = idaapi.get_func_name(ea) or ""
+        name = demangle_ea_name(func.start_ea) or ""
         strings_raw = extract_function_strings(ea)
         top_strings = _compact_strings(strings_raw, limit=5)
         callee_list = _compact_callees(get_callees(hex(ea)))
@@ -378,7 +381,7 @@ def analyze_component(
 
     global_refcount: dict[int, list[str]] = defaultdict(list)
     for ea, gset in func_globals.items():
-        fname = idaapi.get_func_name(ea) or hex(ea)
+        fname = demangle_ea_name(ea) or hex(ea)
         for g in gset:
             global_refcount[g].append(fname)
 
@@ -387,7 +390,7 @@ def analyze_component(
         if len(accessors) >= 2:
             shared_globals.append({
                 "addr": hex(g_ea),
-                "name": idaapi.get_name(g_ea) or hex(g_ea),
+                "name": demangle_ea_name(g_ea) or hex(g_ea),
                 "accessed_by": sorted(accessors),
             })
 
@@ -416,7 +419,7 @@ def analyze_component(
     # --- String usage across functions ---
     string_funcs: dict[str, set[str]] = defaultdict(set)
     for ea in ea_set:
-        fname = idaapi.get_func_name(ea) or hex(ea)
+        fname = demangle_ea_name(ea) or hex(ea)
         for s in (extract_function_strings(ea) or []):
             sval = s.get("value") or s.get("string", "")
             if sval:
@@ -604,11 +607,13 @@ def trace_data_flow(
 
         # Build node info.
         func = idaapi.get_func(ea)
-        func_name = idaapi.get_func_name(ea) if func else None
+        func_name = demangle_ea_name(func.start_ea) if func else None
         insn_text = idc.GetDisasm(ea) if idaapi.is_loaded(ea) else None
+        if insn_text:
+            insn_text = demangle_rendered_line(ea, insn_text)
 
         # Determine if this address references a global/string.
-        name_at = idaapi.get_name(ea)
+        name_at = demangle_ea_name(ea)
         node_type = "code"
         if func is None and idaapi.is_loaded(ea):
             node_type = "data"

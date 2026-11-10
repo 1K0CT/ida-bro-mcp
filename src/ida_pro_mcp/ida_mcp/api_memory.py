@@ -19,6 +19,7 @@ from .utils import (
     MemoryRead,
     normalize_list_input,
     parse_address,
+    resolve_name_ea,
     read_bytes_bss_safe,
     read_int_bss_safe,
 )
@@ -240,9 +241,9 @@ def get_global_value(
                 except Exception:
                     ea = idaapi.BADADDR
 
-            # Fall back to name lookup
+            # Fall back to name lookup (stored or demangled spelling)
             if ea == idaapi.BADADDR:
-                ea = idaapi.get_name_ea(idaapi.BADADDR, query)
+                ea = resolve_name_ea(query)
 
             if ea == idaapi.BADADDR:
                 results.append({"query": query, "value": None, "error": "Not found"})

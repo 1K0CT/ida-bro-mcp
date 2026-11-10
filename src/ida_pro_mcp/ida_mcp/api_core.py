@@ -8,7 +8,6 @@ from typing import Annotated, Any, NotRequired, TypedDict
 import ida_auto
 import ida_bytes
 import idaapi
-import ida_funcs
 import ida_hexrays
 import ida_kernwin
 import ida_lines
@@ -34,12 +33,15 @@ from .utils import (
     NumberConversion,
     Page,
     ImportQuery,
+    demangle_ea_name,
+    demangle_rendered_line,
     get_function,
     normalize_dict_list,
     normalize_list_input,
     parse_address,
     paginate,
     pattern_filter,
+    resolve_name_ea,
 )
 
 
@@ -366,7 +368,7 @@ def _collect_entities(kind: str) -> list[dict]:
                 {
                     "kind": "function",
                     "addr": hex(fn.start_ea),
-                    "name": ida_funcs.get_func_name(fn.start_ea) or "<unnamed>",
+                    "name": demangle_ea_name(fn.start_ea) or "<unnamed>",
                     "size": hex(size_int),
                     "size_int": size_int,
                     "segment": _segment_name_for_ea(fn.start_ea),
@@ -384,7 +386,7 @@ def _collect_entities(kind: str) -> list[dict]:
                 {
                     "kind": "global",
                     "addr": hex(ea),
-                    "name": name,
+                    "name": demangle_ea_name(ea, name),
                     "size": idc.get_item_size(ea),
                     "segment": _segment_name_for_ea(ea),
                 }
@@ -428,7 +430,7 @@ def _collect_entities(kind: str) -> list[dict]:
                 {
                     "kind": "name",
                     "addr": hex(ea),
-                    "name": name,
+                    "name": demangle_ea_name(ea, name),
                     "segment": _segment_name_for_ea(ea),
                     "is_function": is_function,
                     "is_import": is_import,
@@ -625,9 +627,9 @@ def lookup_funcs(
             # Fast path: 0x<ea> or sub_<ea>
             ea = _parse_func_query(query)
 
-            # Slow path: name lookup
+            # Slow path: name lookup (accepts stored and demangled names)
             if ea == idaapi.BADADDR:
-                ea = idaapi.get_name_ea(idaapi.BADADDR, query)
+                ea = resolve_name_ea(query)
 
             if ea != idaapi.BADADDR:
                 func = get_function(ea, raise_error=False)
@@ -759,7 +761,7 @@ def func_query(
         if not fn:
             continue
         size_int = fn.end_ea - fn.start_ea
-        fn_name = ida_funcs.get_func_name(fn.start_ea) or "<unnamed>"
+        fn_name = demangle_ea_name(fn.start_ea) or "<unnamed>"
         has_type = ida_nalt.get_tinfo(ida_typeinf.tinfo_t(), fn.start_ea)
         all_functions.append(
             {
@@ -837,7 +839,9 @@ def list_globals(
     all_globals: list[Global] = []
     for addr, name in idautils.Names():
         if not idaapi.get_func(addr) and name is not None:
-            all_globals.append(Global(addr=hex(addr), name=name))
+            all_globals.append(
+                Global(addr=hex(addr), name=demangle_ea_name(addr, name))
+            )
 
     results = []
     for query in queries:
@@ -1113,15 +1117,26 @@ def _classify_hit_lines(
 
     for tagged in lines:
         text = ida_lines.tag_remove(tagged) or ""
-        if not text or not matcher(text):
+        if not text:
             continue
         is_cmt = _line_is_comment(tagged)
         kind = "comment" if is_cmt else "disasm"
+        # A rendered instruction carrying a trailing comment is tagged as a
+        # comment as a whole; demangle only its code part (the helper splits
+        # at "; " and leaves the user comment verbatim).  Pure comment lines
+        # are left untouched.  Disassembly is matched against both the stored
+        # rendering (so raw-name searches keep working) and the demangled one.
+        if is_cmt and "; " not in text:
+            display_text = text
+        else:
+            display_text = demangle_rendered_line(ea, text)
+        if not matcher(text) and not matcher(display_text):
+            continue
         if kind == "disasm" and not want_disasm:
             continue
         if kind == "comment" and not want_comments:
             continue
-        out.append({"kind": kind, "text": text})
+        out.append({"kind": kind, "text": display_text})
     return out
 
 
@@ -1263,7 +1278,7 @@ def search_text(
                 entry: SearchTextHit = {"addr": hex(head_ea), "matches": lines}
                 func = idaapi.get_func(head_ea)
                 if func is not None:
-                    fname = ida_funcs.get_func_name(func.start_ea)
+                    fname = demangle_ea_name(func.start_ea)
                     if fname:
                         entry["function"] = fname
                 seg = idaapi.getseg(head_ea)

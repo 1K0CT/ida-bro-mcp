@@ -16,7 +16,11 @@ from .compat import tinfo_get_udm
 from .rpc import tool
 from .sync import idasync, IDAError
 from .utils import (
+    demangle_ea_name,
+    demangle_symbol_name,
+    invalidate_demangled_name_cache,
     parse_address,
+    resolve_name_ea,
     decompile_checked,
     refresh_decompiler_ctext,
     hexrays_local_var_exists,
@@ -517,10 +521,11 @@ def rename(
                     placed, place_error = _place_func_in_vibe_dir(func.start_ea)
                 if success and not dry_run:
                     refresh_decompiler_ctext(func.start_ea)
+                    invalidate_demangled_name_cache()
 
                 result = {
                     "addr": addr_text,
-                    "old": old_name,
+                    "old": demangle_symbol_name(old_name) if old_name else None,
                     "name": str(new_name),
                 }
                 if error:
@@ -576,7 +581,7 @@ def rename(
                     ea = parse_address(str(addr_text))
                     old_name = old_name or (idaapi.get_name(ea) or None)
                 elif old_name:
-                    ea = idaapi.get_name_ea(idaapi.BADADDR, str(old_name))
+                    ea = resolve_name_ea(str(old_name))
 
                 if ea == idaapi.BADADDR:
                     result = {
@@ -591,9 +596,11 @@ def rename(
                     continue
 
                 success, error = _set_name_checked(ea, str(new_name))
+                if success and not dry_run:
+                    invalidate_demangled_name_cache()
                 result = {
                     "addr": hex(ea),
-                    "old": old_name,
+                    "old": demangle_symbol_name(old_name) if old_name else None,
                     "new": str(new_name),
                 }
                 if error:
@@ -1096,7 +1103,7 @@ def force_recompile(
             ida_hexrays.mark_cfunc_dirty(ea)
             results.append({
                 "addr": hex(ea),
-                "name": ida_funcs.get_func_name(ea) or "",
+                "name": demangle_ea_name(ea) or "",
                 "ok": True,
             })
         except Exception as e:
@@ -1302,13 +1309,14 @@ def make_data(
 
             if name:
                 ida_name.set_name(ea, name, ida_name.SN_NOCHECK | ida_name.SN_FORCE)
+                invalidate_demangled_name_cache()
 
             # Mark all dependent decompiles dirty so subsequent decompile() gets fresh output.
             ida_hexrays.clear_cached_cfuncs()
 
             results.append({
                 "addr": addr_str,
-                "name": name or (ida_name.get_name(ea) or ""),
+                "name": name or demangle_ea_name(ea),
                 "type": idc.get_type(ea) or "",
                 "size": size,
                 "ok": True,
