@@ -485,6 +485,7 @@ class DisassemblyLine(TypedDict):
     instruction: str
     comments: NotRequired[list[str]]
     refs: NotRequired[list[Ref]]
+    eh: NotRequired[list[dict[str, Any]]]
 
 
 class Argument(TypedDict):
@@ -507,6 +508,7 @@ class DisassemblyFunction(TypedDict):
     arguments: NotRequired[list[Argument]]
     stack_frame: NotRequired[list[StackFrameVariable]]
     lines: list[DisassemblyLine]
+    exception_handling: NotRequired[dict[str, Any]]
 
 
 class Xref(TypedDict):

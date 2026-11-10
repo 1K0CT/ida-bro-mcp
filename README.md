@@ -401,6 +401,18 @@ http://127.0.0.1:13337/mcp?ext=dbg
 
 - `basic_blocks(addrs)`: Get basic blocks with successors and predecessors.
 
+## Exception Handling (x86_64)
+
+- `exception_flow(queries)`: Describe MSVC `__try`/`__except`/`__finally`
+  flow using IDA's parsed `.pdata`/`.xdata` try-block metadata and the CFG.
+  Returns nested try ranges, filter routines, handler blocks, out-of-line
+  `$fin$` handlers, the function-level `__C_specific_handler` table, a
+  node/edge graph, and a textual flow summary. This reuses IDA's built-in
+  `eh_parse`/`tryblks` data, so no extra native plugin is required.
+- `disasm(..., include_eh=true)` and `decompile(..., include_eh=true)` add
+  `EH:` comments at try boundaries, filters, and handlers. Set
+  `include_eh=false` for the original output.
+
 ## Type Operations
 
 - `set_type(edits)`: Apply type(s) to functions, globals, locals, or stack variables.

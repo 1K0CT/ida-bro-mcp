@@ -49,6 +49,7 @@ from .utils import (
     FuncProfileQuery,
     AnalyzeBatchQuery,
 )
+from .eh import annotate_decompile_code, annotate_disasm_entry, get_eh_info
 from . import compat
 
 
@@ -67,6 +68,7 @@ class DecompileResult(TypedDict):
     cursor: NotRequired[ResultCursor]
     refs: NotRequired[list[Ref]]
     refs_truncated: NotRequired[bool]
+    exception_handling: NotRequired[dict]
     error: NotRequired[str]
 
 
@@ -848,6 +850,10 @@ def decompile(
         "pages may be smaller to stay under the output cap",
     ] = 500,
     offset: Annotated[int, "Skip first N pseudocode lines (default: 0)"] = 0,
+    include_eh: Annotated[
+        bool,
+        "Insert x86_64 __try/__except/__finally flow comments into the pseudocode (default: true)",
+    ] = True,
 ) -> DecompileResult:
     """Decompile a function. Follow cursor.next for more code; refs appear on the first page."""
     if max_lines <= 0 or max_lines > 5000:
@@ -866,6 +872,13 @@ def decompile(
                 "cursor": {"done": True},
             }
 
+        eh_info = None
+        if include_eh:
+            func = idaapi.get_func(start)
+            if func is not None:
+                eh_info = get_eh_info(func.start_ea)
+                code, _ = annotate_decompile_code(code, eh_info)
+
         page, line_count, total_lines, more = _paginate_decompile_code(
             code, offset, max_lines
         )
@@ -878,6 +891,10 @@ def decompile(
             "truncated": offset > 0 or more,
             "cursor": {"next": offset + line_count} if more else {"done": True},
         }
+        if eh_info and (eh_info.get("try_blocks") or eh_info.get("function_handler")):
+            result["exception_handling"] = {
+                key: value for key, value in eh_info.items() if key != "annotations"
+            }
 
         # Refs only on the first page to keep later pages under the RPC size envelope.
         if offset == 0:
@@ -913,6 +930,10 @@ def disasm(
     include_total: Annotated[
         bool, "Compute total instruction count (default: false)"
     ] = False,
+    include_eh: Annotated[
+        bool,
+        "Annotate x86_64 __try/__except/__finally blocks and handler routines (default: true)",
+    ] = True,
 ) -> DisasmResult:
     """Disassemble function with offset/max_instructions pagination and optional total count."""
 
@@ -947,6 +968,8 @@ def disasm(
             func_name = "<no function>"
             header_addr = start
 
+        eh_info = get_eh_info(func.start_ea) if func and include_eh else None
+
         lines: list[dict] = []
         seen = 0
         total_count = 0
@@ -976,6 +999,8 @@ def disasm(
                 refs = _collect_line_refs(ea)
                 if refs:
                     entry["refs"] = refs
+                if eh_info:
+                    annotate_disasm_entry(entry, ea, eh_info)
                 lines.append(entry)
                 seen += 1
                 return True
@@ -1029,6 +1054,10 @@ def disasm(
             "segment": segment_name,
             "lines": lines,
         }
+        if eh_info and (eh_info.get("try_blocks") or eh_info.get("function_handler")):
+            out["exception_handling"] = {
+                key: value for key, value in eh_info.items() if key != "annotations"
+            }
         if stack_frame:
             out["stack_frame"] = stack_frame
         if rettype:
