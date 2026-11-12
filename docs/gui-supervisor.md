@@ -105,6 +105,10 @@ Behavior:
 - `open_file` matches a newly launched registration by PID first, then by
   target binary/IDB directory. Unrelated instances that appear concurrently are
   ignored.
+- The pre-launch snapshot records PID/start time as well as host:port.  If the
+  user closes an existing instance during launch and the new IDA reuses its
+  port, the new registration is still recognized instead of being skipped until
+  the wait timeout.
 - Supervisor restart clears selections/claims; claims otherwise expire after
   inactivity (24h).
 

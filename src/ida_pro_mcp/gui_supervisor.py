@@ -287,6 +287,42 @@ def _instance_key(inst: dict[str, Any]) -> tuple[str, int]:
     return str(inst.get("host", DEFAULT_HOST)), int(inst.get("port", 0))
 
 
+def _instance_identity(inst: dict[str, Any]) -> tuple[Any, ...]:
+    """Identity used to distinguish a reused port from the old instance."""
+    try:
+        pid: Any = int(inst.get("pid"))
+    except (TypeError, ValueError):
+        pid = None
+    started_at = str(inst.get("started_at") or "")
+    try:
+        idb_path = os.path.normcase(os.path.abspath(str(inst.get("idb_path") or "")))
+    except Exception:
+        idb_path = str(inst.get("idb_path") or "")
+    binary = str(inst.get("binary") or "").casefold()
+    return pid, started_at, idb_path, binary
+
+
+def _instance_was_present(
+    inst: dict[str, Any], before: dict[tuple[str, int], tuple[Any, ...]]
+) -> bool:
+    """Is *inst* the same pre-launch instance, not a new one on a reused port?
+
+    A port becomes free when the user closes an existing IDA during launch, and
+    the new IDA may bind that same port.  Comparing only (host, port) would
+    mistake the new instance for the old one and wait until timeout.
+    """
+    old = before.get(_instance_key(inst))
+    if old is None:
+        return False
+    old_pid, old_started, old_idb, old_binary = old
+    pid, started, idb, binary = _instance_identity(inst)
+    if old_pid is not None and pid is not None:
+        return old_pid == pid
+    if old_started and started:
+        return old_started == started and old_idb == idb
+    return old == (pid, started, idb, binary)
+
+
 def _target_instance(target: tuple[str, int]) -> dict[str, Any]:
     return {"host": target[0], "port": target[1]}
 
@@ -1352,10 +1388,11 @@ def open_file(
     with LAUNCH_LOCK:
         try:
             before = {
-                _instance_key(inst) for inst in discovery.discover_instances()
+                _instance_key(inst): _instance_identity(inst)
+                for inst in discovery.discover_instances()
             }
         except Exception:
-            before = set()
+            before = {}
 
         launch_cwd = os.path.dirname(ida_exe) or None
         log.info("Launching IDA: %s", args)
@@ -1428,12 +1465,19 @@ def open_file(
             except Exception:
                 current = []
             for inst in current:
-                if _instance_key(inst) in before or _is_self(
+                if _instance_was_present(inst, before) or _is_self(
                     str(inst.get("host", DEFAULT_HOST)), int(inst.get("port", 0))
                 ):
                     continue
                 if str(inst.get("backend", "gui")) == "worker":
                     continue
+                if _instance_key(inst) in before:
+                    log.info(
+                        "open_file: port %s was reused by a new instance "
+                        "(pid=%s); checking launch match",
+                        inst.get("port", "?"),
+                        inst.get("pid", "?"),
+                    )
                 if discovery._instance_matches_launch(
                     inst,
                     proc.pid if proc is not None else None,
