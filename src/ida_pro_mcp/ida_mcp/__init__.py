@@ -37,6 +37,7 @@ from . import api_resources
 from . import api_survey
 from . import api_composite
 from . import api_eh
+from . import api_bindiff
 from . import trace as trace
 from . import api_sigmaker
 
@@ -67,6 +68,7 @@ __all__ = [
     "api_survey",
     "api_composite",
     "api_eh",
+    "api_bindiff",
     "api_sigmaker",
     # Re-exported components
     "idasync",

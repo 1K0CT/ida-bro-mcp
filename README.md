@@ -413,6 +413,40 @@ http://127.0.0.1:13337/mcp?ext=dbg
   `EH:` comments at try boundaries, filters, and handlers. Set
   `include_eh=false` for the original output.
 
+## Binary Diffing (BinDiff)
+
+Designed for vulnerability-fix analysis of frequently updated components:
+only matched functions with low similarity are surfaced; unmatched functions
+are intentionally ignored.
+
+- `bindiff_diff(secondary, primary="", ...)`: Export the current/new IDB with
+  BinExport, export the closed older IDB with the BinDiff CLI, run
+  `bindiff.exe`, and return the low-similarity matched function pairs. Results
+  are written as a `.BinDiff` SQLite database plus a sidecar JSON.
+- `bindiff_low_similarity(database, max_similarity=0.99, ...)`: Re-query or
+  page through low-similarity matched functions without rerunning the diff.
+- `bindiff_best_match(database, addr)`: Return the highest-similarity matched
+  counterpart for a primary/secondary address or name; duplicate-name matches
+  are ranked by similarity and returned with alternatives.
+- `bindiff_function_diff(database, addr)`: Show changed matched instructions
+  and primary-only/secondary-only instructions for one function pair.
+
+Requirements: BinDiff installed and `bindiff.exe`/`binexport2dump.exe`
+available. The current IDB is exported in-process via the BinExport IDC
+extension; the older IDB must be closed (or supplied as `.BinExport`).
+
+Typical workflow:
+
+```text
+bindiff_diff(secondary="old.dll.i64", max_similarity=0.95, limit=20)
+  -> database: .../primary_vs_secondary.BinDiff
+  -> functions: matched pairs sorted by lowest similarity
+
+bindiff_function_diff(database=".../primary_vs_secondary.BinDiff",
+                      addr="0x1800172e0")
+  -> changed_matched_instructions / primary_only / secondary_only
+```
+
 ## Type Operations
 
 - `set_type(edits)`: Apply type(s) to functions, globals, locals, or stack variables.
