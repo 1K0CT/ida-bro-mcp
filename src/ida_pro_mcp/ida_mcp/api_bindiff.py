@@ -64,6 +64,19 @@ class BindiffBestMatchResult(TypedDict, total=False):
     error: NotRequired[str | None]
 
 
+class BindiffNewFunctionsResult(TypedDict, total=False):
+    database: str
+    primary: dict
+    secondary: dict
+    summary: dict
+    functions: list[dict]
+    total: int
+    offset: int
+    limit: int
+    note: str
+    error: NotRequired[str | None]
+
+
 def _workspace(output_dir: str) -> Path:
     if output_dir.strip():
         path = Path(output_dir.strip()).expanduser().resolve()
@@ -310,6 +323,84 @@ def bindiff_best_match(
             "function": None,
             "alternatives": [],
             "matched_count": 0,
+            "error": str(exc),
+        }
+
+
+@tool
+@idasync
+@tool_timeout(600.0)
+def bindiff_new_functions(
+    database: Annotated[str, "Path to a .BinDiff SQLite database"],
+    primary_binexport: Annotated[
+        str,
+        "Primary/new .BinExport path; empty reads the sidecar written by bindiff_diff",
+    ] = "",
+    secondary_binexport: Annotated[
+        str,
+        "Secondary/old .BinExport path; empty reads the sidecar written by bindiff_diff",
+    ] = "",
+    include_imports: Annotated[
+        bool, "Include import stubs (BinExport function flag i)"
+    ] = False,
+    include_thunks: Annotated[
+        bool, "Include thunks (BinExport function flag t)"
+    ] = False,
+    include_library: Annotated[
+        bool, "Include library functions (BinExport function flag l)"
+    ] = False,
+    min_instructions: Annotated[
+        int, "Only return functions with at least this many instructions"
+    ] = 0,
+    name_contains: Annotated[
+        str, "Case-insensitive substring filter on the function name"
+    ] = "",
+    exclude_name_matches: Annotated[
+        bool,
+        "Exclude functions whose exact name already exists in the older version",
+    ] = False,
+    offset: Annotated[int, "Skip the first N new functions"] = 0,
+    limit: Annotated[
+        int, "Max new functions to return (default: 50, max: 500)"
+    ] = 50,
+) -> BindiffNewFunctionsResult:
+    """List functions present only in the primary/new version.
+
+    The .BinDiff database contains matched pairs only, so this tool enumerates
+    both BinExport files and subtracts the matched addresses.  Use it after
+    ``bindiff_diff`` to check whether an update added functions.  Import
+    stubs, thunks, and library functions are hidden by default; pass the
+    corresponding include flags to see them.  A function whose name also
+    exists in the older version is marked ``name_in_other_version`` and is
+    more likely a moved/renamed function than new code (use
+    ``exclude_name_matches=true`` to hide those).
+    """
+    try:
+        result = bindiff.new_functions(
+            database,
+            primary_binexport=primary_binexport or None,
+            secondary_binexport=secondary_binexport or None,
+            include_imports=include_imports,
+            include_thunks=include_thunks,
+            include_library=include_library,
+            min_instructions=min_instructions,
+            name_contains=name_contains,
+            exclude_name_matches=exclude_name_matches,
+            offset=offset,
+            limit=limit,
+        )
+        result.setdefault("error", None)
+        return result
+    except Exception as exc:
+        return {
+            "database": str(database),
+            "primary": {},
+            "secondary": {},
+            "summary": {},
+            "functions": [],
+            "total": 0,
+            "offset": offset,
+            "limit": limit,
             "error": str(exc),
         }
 

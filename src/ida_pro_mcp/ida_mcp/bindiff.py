@@ -522,11 +522,14 @@ _DUMP_CACHE: dict[tuple[str, int, int], dict[str, Any]] = {}
 def parse_binexport_dump(text: str) -> dict[str, Any]:
     """Parse the textual output of binexport2dump.exe.
 
-    Returns ``{"functions": {addr: name}, "sections": {addr: {...}}}``.
-    A function section contains its instruction list and block-start addresses.
+    Returns ``{"functions": {addr: name}, "function_flags": {addr: flag},
+    "sections": {addr: {...}}}``.  The flag is BinExport's function type:
+    ``n`` normal, ``l`` library, ``i`` imported, ``t`` thunk.  A function
+    section contains its instruction list and block-start addresses.
     """
     lines = text.splitlines()
     functions: dict[int, str] = {}
+    function_flags: dict[int, str] = {}
     try:
         start = lines.index("Functions:") + 1
     except ValueError:
@@ -541,7 +544,9 @@ def parse_binexport_dump(text: str) -> dict[str, Any]:
             break
         match = _FUNC_RE.match(line.strip())
         if match:
-            functions[int(match.group(1), 16)] = match.group(3).strip()
+            addr = int(match.group(1), 16)
+            functions[addr] = match.group(3).strip()
+            function_flags[addr] = match.group(2)
 
     starts = set(functions)
     sections: dict[int, dict[str, Any]] = {}
@@ -571,7 +576,11 @@ def parse_binexport_dump(text: str) -> dict[str, Any]:
                 sections[current]["instructions"].append(
                     (int(insn.group(1), 16), text_value)
                 )
-    return {"functions": functions, "sections": sections}
+    return {
+        "functions": functions,
+        "function_flags": function_flags,
+        "sections": sections,
+    }
 
 
 def _dump_for(
@@ -882,3 +891,169 @@ def function_diff(
         "error": dump_error,
     }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Primary-only (new) functions
+# ---------------------------------------------------------------------------
+
+
+_FUNCTION_KINDS = {
+    "n": "normal",
+    "l": "library",
+    "i": "import",
+    "t": "thunk",
+}
+
+
+def new_functions(
+    database: str | Path,
+    *,
+    primary_binexport: str | Path | None = None,
+    secondary_binexport: str | Path | None = None,
+    include_imports: bool = False,
+    include_thunks: bool = False,
+    include_library: bool = False,
+    min_instructions: int = 0,
+    name_contains: str = "",
+    exclude_name_matches: bool = False,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """List functions present only in the primary/new BinExport.
+
+    A .BinDiff database only stores matched pairs, so the unmatched functions
+    must be recovered by enumerating both BinExport files and subtracting the
+    matched addresses.  Import stubs, thunks, and library functions are hidden
+    by default because they are rarely the new component code being sought.
+    """
+    min_instructions = max(0, int(min_instructions))
+    offset = max(0, int(offset))
+    limit = max(1, min(500, int(limit)))
+    needle = name_contains.strip().casefold()
+
+    sidecar = read_sidecar(database)
+    primary_path = primary_binexport or sidecar.get("primary_binexport")
+    secondary_path = secondary_binexport or sidecar.get("secondary_binexport")
+    if not primary_path or not secondary_path:
+        raise BindiffError(
+            "both BinExport files are required: pass primary_binexport and "
+            "secondary_binexport, or use a database created by bindiff_diff()"
+        )
+
+    primary_dump = _dump_for(primary_path)
+    secondary_dump = _dump_for(secondary_path)
+    primary_funcs = primary_dump.get("functions") or {}
+    secondary_funcs = secondary_dump.get("functions") or {}
+    primary_flags = primary_dump.get("function_flags") or {}
+    primary_sections = primary_dump.get("sections") or {}
+    secondary_names = {
+        _name(name) for name in secondary_funcs.values() if name
+    }
+
+    conn = _connect(database)
+    try:
+        cur = conn.cursor()
+        matched_primary = {
+            row[0] for row in cur.execute("SELECT address1 FROM function")
+        }
+        matched_secondary = {
+            row[0] for row in cur.execute("SELECT address2 FROM function")
+        }
+        matched_pairs = cur.execute("SELECT COUNT(*) FROM function").fetchone()[0]
+    finally:
+        conn.close()
+
+    missing_primary = matched_primary - set(primary_funcs)
+    missing_secondary = matched_secondary - set(secondary_funcs)
+    if missing_primary or missing_secondary:
+        raise BindiffError(
+            "BinExport files do not match this BinDiff database: "
+            f"{len(missing_primary)} matched primary and "
+            f"{len(missing_secondary)} matched secondary addresses are missing "
+            "from the dumps; pass the BinExports used to create the database"
+        )
+
+    unmatched_primary = sorted(set(primary_funcs) - matched_primary)
+    unmatched_secondary = set(secondary_funcs) - matched_secondary
+
+    filtered = {
+        "imports": 0,
+        "thunks": 0,
+        "library": 0,
+        "min_instructions": 0,
+        "name_contains": 0,
+        "name_matches": 0,
+    }
+    candidates: list[dict[str, Any]] = []
+    for addr in unmatched_primary:
+        flag = str(primary_flags.get(addr, "")).lower()
+        kind = _FUNCTION_KINDS.get(flag, "unknown")
+        section = primary_sections.get(addr) or {}
+        name = _name(primary_funcs.get(addr) or "")
+        item = {
+            "addr": _hex(addr),
+            "name": name,
+            "kind": kind,
+            "flag": flag,
+            "instructions": len(section.get("instructions", [])),
+            "basic_blocks": len(section.get("blocks", [])),
+            "name_in_other_version": bool(name and name in secondary_names),
+        }
+
+        if kind == "import" and not include_imports:
+            filtered["imports"] += 1
+            continue
+        if kind == "thunk" and not include_thunks:
+            filtered["thunks"] += 1
+            continue
+        if kind == "library" and not include_library:
+            filtered["library"] += 1
+            continue
+        if item["instructions"] < min_instructions:
+            filtered["min_instructions"] += 1
+            continue
+        if needle and needle not in name.casefold():
+            filtered["name_contains"] += 1
+            continue
+        if exclude_name_matches and item["name_in_other_version"]:
+            filtered["name_matches"] += 1
+            continue
+        candidates.append(item)
+
+    total = len(candidates)
+    functions = candidates[offset : offset + limit]
+    return {
+        "database": _asan_path(Path(database)),
+        "primary": {
+            "binexport": _asan_path(Path(primary_path)),
+            "source": sidecar.get("primary_source"),
+        },
+        "secondary": {
+            "binexport": _asan_path(Path(secondary_path)),
+            "source": sidecar.get("secondary_source"),
+        },
+        "summary": {
+            "primary_functions": len(primary_funcs),
+            "secondary_functions": len(secondary_funcs),
+            "matched_pairs": matched_pairs,
+            "unmatched": {
+                "primary": len(unmatched_primary),
+                "secondary": len(unmatched_secondary),
+            },
+            "selected_side": "primary",
+            "filtered": filtered,
+        },
+        "functions": functions,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "note": (
+            "The .BinDiff database stores matched pairs only; new functions "
+            "are primary BinExport functions absent from every matched pair. "
+            "Imports, thunks, and library functions are hidden by default. "
+            "name_in_other_version marks a possible move/rename rather than "
+            "new code."
+        ),
+        "error": None,
+    }

@@ -119,9 +119,10 @@ mutation, or reopen is required.
 
 ### BinDiff vulnerability-fix diffing
 
-Aimed at vulnerability-fix analysis of frequently updated components. Only
-matched functions with low similarity are surfaced; unmatched functions are
-intentionally ignored.
+Aimed at vulnerability-fix analysis of frequently updated components. The
+similarity tools focus on matched pairs with low similarity; use
+`bindiff_new_functions` to inspect primary-only functions that a `.BinDiff`
+database does not store as rows.
 
 - `bindiff_diff(secondary, primary="", ...)`: Export the current/new IDB with
   BinExport, export the closed older IDB with the BinDiff CLI, run
@@ -132,6 +133,11 @@ intentionally ignored.
 - `bindiff_best_match(database, addr)`: Resolve a primary/secondary address or
   name to its highest-similarity matched counterpart. Duplicate-name matches are
   ranked by similarity and returned with alternatives.
+- `bindiff_new_functions(database, ...)`: Enumerate both BinExport files,
+  subtract the matched addresses, and list functions present only in the
+  primary/new version. Import stubs, thunks, and library functions are hidden
+  by default; hidden counts are reported. Functions whose exact name also
+  exists in the older version are marked as possible moves/renames.
 - `bindiff_function_diff(database, addr)`: Show changed matched instructions and
   primary-only/secondary-only instructions for one matched function pair.
 
@@ -146,10 +152,18 @@ bindiff_diff(secondary="old.dll.i64", max_similarity=0.95, limit=20)
   -> database: .../primary_vs_secondary.BinDiff
   -> functions: matched pairs sorted by lowest similarity
 
+bindiff_new_functions(database=".../primary_vs_secondary.BinDiff")
+  -> functions: primary-only addresses/names (normal functions by default)
+
 bindiff_function_diff(database=".../primary_vs_secondary.BinDiff",
                       addr="0x1800172e0")
   -> changed_matched_instructions / primary_only / secondary_only
 ```
+
+`bindiff_new_functions` needs both BinExport files because the `.BinDiff`
+database stores matched pairs only. It reads them from the sidecar written by
+`bindiff_diff`, or accepts explicit `primary_binexport`/`secondary_binexport`
+paths for databases produced elsewhere.
 
 ### Correctness fixes
 
